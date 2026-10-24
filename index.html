@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+  <title>KZM · Carrito Chaac AR</title>
+  <script src="https://aframe.io/releases/1.5.0/aframe.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/mind-ar@1.2.5/dist/mindar-image-aframe.prod.js"></script>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #000; font-family: system-ui, -apple-system, sans-serif; }
+    .ui { position: fixed; z-index: 10; }
+    #brand { top: 16px; left: 16px; color: #fff; text-shadow: 0 1px 4px rgba(0,0,0,.7); }
+    #brand b { display: block; font-size: 20px; letter-spacing: .02em; }
+    #brand span { font-size: 11px; letter-spacing: .14em; color: #e0a526; text-transform: uppercase; }
+    #hint {
+      left: 50%; bottom: 88px; transform: translateX(-50%);
+      padding: 10px 18px; border-radius: 999px; background: rgba(0,0,0,.6);
+      color: #fff; font-size: 15px; transition: opacity .4s; pointer-events: none; white-space: nowrap;
+    }
+    #hint.hidden { opacity: 0; }
+    #portfolio {
+      left: 50%; bottom: 28px; transform: translateX(-50%);
+      padding: 12px 22px; border-radius: 999px; background: #d99a22; color: #1a1a1a;
+      font-size: 14px; font-weight: 600; letter-spacing: .06em; text-decoration: none; text-transform: uppercase;
+    }
+  </style>
+</head>
+<body>
+  <div id="brand" class="ui"><b>KZM</b><span>Carrito Chaac · IRTRA</span></div>
+  <div id="hint" class="ui">Apunta la cámara a la tarjeta</div>
+  <a id="portfolio" class="ui" href="https://kzmdesigns.com">Ver portafolio</a>
+
+  <!-- targets.mind trae los dos lados: 0 = reverso (KZM + QR), 1 = frente -->
+  <a-scene
+    mindar-image="imageTargetSrc: ./targets.mind; maxTrack: 1; uiScanning: no; uiLoading: yes; filterMinCF: 0.0001; filterBeta: 0.001"
+    gltf-model="dracoDecoderPath: https://www.gstatic.com/draco/versioned/decoders/1.5.6/"
+    color-space="sRGB"
+    renderer="colorManagement: true; antialias: true"
+    vr-mode-ui="enabled: false"
+    device-orientation-permission-ui="enabled: false">
+
+    <a-assets>
+      <a-asset-item id="cart" src="./model.glb"></a-asset-item>
+    </a-assets>
+
+    <a-camera position="0 0 0" look-controls="enabled: false"></a-camera>
+    <a-light type="ambient" intensity="0.9"></a-light>
+    <a-light type="directional" intensity="1.1" position="1 2 2"></a-light>
+
+    <a-entity class="card" mindar-image-target="targetIndex: 0"></a-entity>
+    <a-entity class="card" mindar-image-target="targetIndex: 1"></a-entity>
+  </a-scene>
+
+  <script>
+    // Mismo carrito en ambos lados. La tarjeta mide 1 unidad de ancho.
+    // SCALE: alto del carrito ≈ 0.64 del ancho de la tarjeta. SPIN: ms por vuelta (0 = sin giro).
+    const SCALE = 0.15, SPIN = 14000;
+    const cart = `
+      <a-circle radius="0.25" position="0 0 0.002" material="color:#000; opacity:0.28; transparent:true; shader:flat"></a-circle>
+      <a-entity rotation="90 0 0">
+        <a-entity scale="${SCALE} ${SCALE} ${SCALE}"
+          ${SPIN ? `animation="property: rotation; from: 0 0 0; to: 0 360 0; loop: true; dur: ${SPIN}; easing: linear"` : ''}>
+          <a-entity gltf-model="#cart" position="0.17 0.2 0.04"></a-entity>
+        </a-entity>
+      </a-entity>`;
+    const hint = document.getElementById('hint');
+    let visible = 0;
+    document.querySelectorAll('.card').forEach(t => {
+      t.innerHTML = cart;
+      t.addEventListener('targetFound', () => { visible++; hint.classList.add('hidden'); window.FOUND = true; });
+      t.addEventListener('targetLost', () => { visible = Math.max(0, visible - 1); if (!visible) hint.classList.remove('hidden'); });
+    });
+  </script>
+</body>
+</html>
