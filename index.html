@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+  <title>KZM · Odyssey AR</title>
+  <script src="https://aframe.io/releases/1.5.0/aframe.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/aframe-extras@7.2.0/dist/aframe-extras.min.js"></script>
+  <script>
+    // Pide la camara en HD (sin esto el iPhone da 640x480 y todo se ve borroso)
+    (function () {
+      const md = navigator.mediaDevices; if (!md || !md.getUserMedia) return;
+      const orig = md.getUserMedia.bind(md);
+      md.getUserMedia = (c) => {
+        if (c && c.video && typeof c.video === 'object') c.video = Object.assign({ width: { ideal: 1280 }, height: { ideal: 720 } }, c.video);
+        return orig(c);
+      };
+    })();
+  </script>
+  <script>
+// KZM · realismo para el diorama: luz ambiental con reflejos, tono cinematografico y textura procedural
+// (sin UVs) para roca, piedra y suelo. Usado por index.html.
+(function (g) {
+  // Mapa de entorno: cielo claro arriba, horizonte calido, suelo oscuro. Da reflejos suaves y luz realista.
+  g.kzmMakeEnv = function (THREE, renderer) {
+    const c = document.createElement('canvas'); c.width = 512; c.height = 256;
+    const x = c.getContext('2d'); const gr = x.createLinearGradient(0, 0, 0, 256);
+    gr.addColorStop(0.00, '#cfe3f5'); gr.addColorStop(0.42, '#f4efe6'); gr.addColorStop(0.50, '#e9dcc6');
+    gr.addColorStop(0.58, '#8b7d6b'); gr.addColorStop(1.00, '#3b342d');
+    x.fillStyle = gr; x.fillRect(0, 0, 512, 256);
+    x.fillStyle = 'rgba(255,250,235,0.95)'; x.beginPath(); x.ellipse(150, 60, 40, 22, 0, 0, Math.PI * 2); x.fill(); // "sol" suave
+    const tex = new THREE.CanvasTexture(c); tex.mapping = THREE.EquirectangularReflectionMapping;
+    if ('colorSpace' in tex) tex.colorSpace = THREE.SRGBColorSpace; else tex.encoding = THREE.sRGBEncoding;
+    const pm = new THREE.PMREMGenerator(renderer); const env = pm.fromEquirectangular(tex).texture; pm.dispose(); tex.dispose();
+    return env;
+  };
+  const NOISE = `
+    float kzh(vec3 p){ p = fract(p*0.3183099+0.1); p*=17.0; return fract(p.x*p.y*p.z*(p.x+p.y+p.z)); }
+    float kzn(vec3 x){ vec3 i=floor(x); vec3 f=fract(x); f=f*f*(3.0-2.0*f);
+      return mix(mix(mix(kzh(i),kzh(i+vec3(1,0,0)),f.x),mix(kzh(i+vec3(0,1,0)),kzh(i+vec3(1,1,0)),f.x),f.y),
+                 mix(mix(kzh(i+vec3(0,0,1)),kzh(i+vec3(1,0,1)),f.x),mix(kzh(i+vec3(0,1,1)),kzh(i+vec3(1,1,1)),f.x),f.y),f.z); }
+    float kzfbm(vec3 p){ float a=0.5, s=0.0; for(int i=0;i<4;i++){ s+=a*kzn(p); p*=2.07; a*=0.5; } return s; }`;
+  // grano procedural: variacion de color y rugosidad segun la posicion en el modelo (metros)
+  g.kzmGrain = function (mat, scale, amount, dark) {
+    if (mat.userData.kzmGrain) return; mat.userData.kzmGrain = true;
+    mat.onBeforeCompile = (sh) => {
+      sh.uniforms.kzS = { value: scale }; sh.uniforms.kzA = { value: amount }; sh.uniforms.kzD = { value: dark };
+      sh.vertexShader = sh.vertexShader.replace('#include <common>', '#include <common>\nvarying vec3 kzP;')
+        .replace('#include <begin_vertex>', '#include <begin_vertex>\nkzP = position;');
+      sh.fragmentShader = sh.fragmentShader.replace('#include <common>', '#include <common>\nvarying vec3 kzP; uniform float kzS; uniform float kzA; uniform float kzD;' + NOISE)
+        .replace('#include <color_fragment>', `#include <color_fragment>
+          float kzg = kzfbm(kzP*kzS); float kzc = kzfbm(kzP*kzS*0.18+7.3);
+          diffuseColor.rgb *= mix(1.0-kzA, 1.0+kzA*0.6, kzg) * mix(1.0-kzD, 1.0, kzc);`)
+        .replace('#include <roughnessmap_fragment>', '#include <roughnessmap_fragment>\nroughnessFactor = clamp(roughnessFactor + (kzfbm(kzP*kzS*1.7)-0.5)*0.25, 0.04, 1.0);');
+    };
+    mat.needsUpdate = true;
+  };
+  g.kzmApplyRealism = function (THREE, root) {
+    root.traverse((o) => {
+      if (!o.isMesh) return; o.castShadow = true; o.receiveShadow = true;
+      (Array.isArray(o.material) ? o.material : [o.material]).forEach((m) => {
+        const n = m.name || '';
+        if (/Rock|Basalt|_auto_10|Ithaca_Inner|Sea_Rock/i.test(n)) g.kzmGrain(m, 0.9, 0.22, 0.18);
+        else if (/^_auto_$|Plaza|Concrete|Stone|Sandstone|Fixture_Stone/i.test(n)) g.kzmGrain(m, 1.6, 0.12, 0.10);
+        else if (/Marble|Shell|Carving/i.test(n)) g.kzmGrain(m, 2.5, 0.07, 0.05);
+        else if (/Foliage|Vines/i.test(n)) g.kzmGrain(m, 3.0, 0.25, 0.15);
+        if (m.transparent && /Water|Glass|Splash/i.test(n)) { m.depthWrite = false; }
+        m.envMapIntensity = /Water|Glass/i.test(n) ? 1.6 : 1.0;
+        m.needsUpdate = true;
+      });
+    });
+  };
+})(window);
+
+  </script>
+  <script src="https://cdn.jsdelivr.net/npm/mind-ar@1.2.5/dist/mindar-image-aframe.prod.js"></script>
+  <style>
+    html { background: #000; }
+    html, body { margin: 0; height: 100%; overflow: hidden; font-family: system-ui, -apple-system, sans-serif; }
+    body { background: transparent; }
+    .ui { position: fixed; z-index: 10; }
+    #brand { top: 16px; left: 16px; color: #fff; text-shadow: 0 1px 4px rgba(0,0,0,.7); }
+    #brand b { display: block; font-size: 22px; letter-spacing: .08em; font-family: Georgia, 'Times New Roman', serif; }
+    #brand span { font-size: 11px; letter-spacing: .16em; color: #e0a526; text-transform: uppercase; }
+    #hint {
+      left: 50%; bottom: 88px; transform: translateX(-50%);
+      padding: 10px 18px; border-radius: 999px; background: rgba(0,0,0,.6);
+      color: #fff; font-size: 15px; transition: opacity .4s; pointer-events: none; white-space: nowrap;
+    }
+    #hint.hidden { opacity: 0; }
+    #loading { top: 50%; left: 50%; transform: translate(-50%,-50%); color: #fff; font-size: 14px; letter-spacing: .1em; }
+    #work {
+      left: 50%; bottom: 28px; transform: translateX(-50%);
+      padding: 12px 22px; border-radius: 999px; background: #d99a22; color: #1a1a1a;
+      font-size: 14px; font-weight: 600; letter-spacing: .06em; text-decoration: none;
+    }
+  </style>
+</head>
+<body>
+  <div id="brand" class="ui"><b>ODYSSEY</b><span>KZM · Water coaster concept</span></div>
+  <div id="hint" class="ui">Apunta al lado del QR de AR</div>
+  <a id="work" class="ui" href="https://kzmdesigns.com">kzmdesigns.com</a>
+
+  <!-- targets.mind: solo el reverso (lado del QR de AR), para que no lo confunda con el frente -->
+  <a-scene
+    mindar-image="imageTargetSrc: ./targets.mind?v=5; maxTrack: 1; uiScanning: no; uiLoading: yes; filterMinCF: 0.00005; filterBeta: 0.001; missTolerance: 12; warmupTolerance: 3"
+    gltf-model="dracoDecoderPath: https://www.gstatic.com/draco/versioned/decoders/1.5.6/"
+    color-space="sRGB"
+    renderer="colorManagement: true; antialias: true; maxCanvasWidth: 2048; maxCanvasHeight: 2048; precision: highp"
+    vr-mode-ui="enabled: false"
+    device-orientation-permission-ui="enabled: false"
+    shadow="type: pcfsoft; autoUpdate: true">
+
+    <a-assets timeout="60000">
+      <a-asset-item id="odyssey" src="./odyssey.glb?v=5"></a-asset-item>
+    </a-assets>
+
+    <a-camera position="0 0 0" look-controls="enabled: false"></a-camera>
+    <a-light type="hemisphere" color="#ffffff" ground-color="#8a8070" intensity="0.35"></a-light>
+
+    <a-entity class="card" mindar-image-target="targetIndex: 0"></a-entity>
+    <!-- El diorama no vive dentro del ticket: lo sigue con suavizado para que no tiemble -->
+    <a-entity id="follower" smooth-follow="targets: .card"></a-entity>
+  </a-scene>
+
+  <script>
+    // ===== AJUSTES =====
+    // SCALE: tamaño del diorama (0.0052 = cabe justo en el ticket).
+    // SMOOTH: suavizado del movimiento, de 0 a 1. Más bajo = más estable pero sigue más lento al ticket.
+    // HOLD_MS: cuánto tiempo se queda el diorama si la cámara pierde el ticket un momento.
+    const EXPOSURE = 0.85;  // brillo general: sube a 1.0 si lo ves oscuro, baja a 0.7 si se ve quemado
+    const SCALE = 0.0052, SMOOTH = 0.14, SMOOTH_ROT = 0.07, HOLD_MS = 700;
+    // DEAD_DEG / DEAD_DIST: movimientos mas chicos que esto se ignoran, para que quieto se quede quieto.
+    const DEAD_DEG = 0.8, DEAD_DIST = 0.012;
+    // JUMP_DEG / JUMP_DIST: un salto mayor que esto se ignora salvo que se repita CONFIRM frames seguidos.
+    const JUMP_DEG = 25, JUMP_DIST = 0.35, CONFIRM = 5;
+
+    AFRAME.registerComponent('smooth-follow', {
+      schema: { targets: { type: 'string' } },
+      init() {
+        this.targets = [...document.querySelectorAll(this.data.targets)];
+        this.p = new THREE.Vector3(); this.q = new THREE.Quaternion(); this.s = new THREE.Vector3();
+        this.has = false; this.lastSeen = 0;
+        this.el.object3D.visible = false;
+      },
+      tick(t, dt) {
+        const o = this.el.object3D;
+        const tg = this.targets.find(e => e.object3D.visible);
+        if (tg) {
+          tg.object3D.updateMatrixWorld(true);
+          tg.object3D.matrixWorld.decompose(this.p, this.q, this.s);
+          if (!this.has) { o.position.copy(this.p); o.quaternion.copy(this.q); o.scale.copy(this.s); this.has = true; this.bad = 0; }
+          else {
+            // Detecta saltos: angulo y distancia (relativa al ancho del ticket) contra la pose actual
+            const ang = THREE.MathUtils.radToDeg(o.quaternion.angleTo(this.q));
+            const dist = o.position.distanceTo(this.p) / Math.max(1e-6, o.scale.x);
+            if (ang > JUMP_DEG || dist > JUMP_DIST) {
+              this.bad++;
+              if (this.bad < CONFIRM) { this.lastSeen = t; return; }   // frame dudoso: lo ignoramos
+              o.position.copy(this.p); o.quaternion.copy(this.q); o.scale.copy(this.s); // el cambio es real
+            } else if (ang < DEAD_DEG && dist < DEAD_DIST) {
+              // ticket quieto: no movemos nada (aqui se elimina el temblor fino)
+            } else {
+              const f = (dt || 16.7) / 16.7;
+              const k = 1 - Math.pow(1 - SMOOTH, f), kr = 1 - Math.pow(1 - SMOOTH_ROT, f);
+              o.position.lerp(this.p, k); o.quaternion.slerp(this.q, kr); o.scale.lerp(this.s, k);
+            }
+            this.bad = 0;
+          }
+          o.visible = true; this.lastSeen = t;
+        } else if (this.has && t - this.lastSeen > HOLD_MS) {
+          o.visible = false; this.has = false;
+        }
+      }
+    });
+
+    document.getElementById('follower').innerHTML = `
+      <a-entity id="sunTarget" position="0 0 0"></a-entity>
+      <a-entity light="type: directional; intensity: 1.5; color: #fff4e6; castShadow: true; target: #sunTarget;
+                       shadowMapWidth: 2048; shadowMapHeight: 2048; shadowBias: -0.0006;
+                       shadowCameraLeft: -0.75; shadowCameraRight: 0.75; shadowCameraTop: 0.75; shadowCameraBottom: -0.75;
+                       shadowCameraNear: 0.05; shadowCameraFar: 3" position="0.45 -0.55 1.3"></a-entity>
+      <a-entity rotation="90 0 0">
+        <a-entity rotation="0 90 0" scale="${SCALE} ${SCALE} ${SCALE}">
+          <a-entity id="model" gltf-model="#odyssey" position="-832.5 7.5 1774"
+            animation-mixer="clip: *; loop: repeat; timeScale: 1"></a-entity>
+        </a-entity>
+      </a-entity>`;
+
+    const hint = document.getElementById('hint');
+    let visible = 0;
+    document.querySelectorAll('.card').forEach(t => {
+      t.addEventListener('targetFound', () => { visible++; hint.classList.add('hidden'); window.FOUND = true; });
+      t.addEventListener('targetLost', () => { visible = Math.max(0, visible - 1); if (!visible) hint.classList.remove('hidden'); });
+    });
+    // Limita la resolucion en pantallas muy densas para ganar fluidez
+    // Luz ambiental con reflejos, tono cinematografico y resolucion nativa
+    const sceneEl = document.querySelector('a-scene');
+    const setupLook = () => {
+      const r = sceneEl.renderer;
+      r.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      r.toneMapping = THREE.ACESFilmicToneMapping; r.toneMappingExposure = EXPOSURE;
+      r.shadowMap.enabled = true; r.shadowMap.type = THREE.PCFSoftShadowMap;
+      sceneEl.object3D.environment = window.kzmMakeEnv(THREE, r);
+    };
+    if (sceneEl.hasLoaded) setupLook(); else sceneEl.addEventListener('loaded', setupLook);
+    // Materiales mas realistas en cuanto carga el modelo
+    document.querySelector('#follower').addEventListener('model-loaded', (e) => {
+      window.kzmApplyRealism(THREE, e.target.getObject3D('mesh'));
+    });
+  </script>
+</body>
+</html>
