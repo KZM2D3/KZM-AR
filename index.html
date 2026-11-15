@@ -34,10 +34,10 @@
 
   <!-- targets.mind: 0 = reverso (Odyssey + QR AR), 1 = frente (nombre + QR Work) -->
   <a-scene
-    mindar-image="imageTargetSrc: ./targets.mind; maxTrack: 1; uiScanning: no; uiLoading: yes; filterMinCF: 0.0001; filterBeta: 0.001"
+    mindar-image="imageTargetSrc: ./targets.mind; maxTrack: 1; uiScanning: no; uiLoading: yes; filterMinCF: 0.0001; filterBeta: 0.001; missTolerance: 12; warmupTolerance: 3"
     gltf-model="dracoDecoderPath: https://www.gstatic.com/draco/versioned/decoders/1.5.6/"
     color-space="sRGB"
-    renderer="colorManagement: true; antialias: true"
+    renderer="colorManagement: true; antialias: false; maxCanvasWidth: 1280; maxCanvasHeight: 1280; precision: mediump"
     vr-mode-ui="enabled: false"
     device-orientation-permission-ui="enabled: false">
 
@@ -51,25 +51,60 @@
 
     <a-entity class="card" mindar-image-target="targetIndex: 0"></a-entity>
     <a-entity class="card" mindar-image-target="targetIndex: 1"></a-entity>
+    <!-- El diorama no vive dentro del ticket: lo sigue con suavizado para que no tiemble -->
+    <a-entity id="follower" smooth-follow="targets: .card"></a-entity>
   </a-scene>
 
   <script>
-    // El diorama mide ~188 m de largo; SCALE lo ajusta al ancho del ticket (1 unidad).
-    // Para hacerlo más grande o más chico, cambia SCALE (0.0052 = cabe justo en el ticket).
-    const SCALE = 0.0052;
-    const diorama = `
+    // ===== AJUSTES =====
+    // SCALE: tamaño del diorama (0.0052 = cabe justo en el ticket).
+    // SMOOTH: suavizado del movimiento, de 0 a 1. Más bajo = más estable pero sigue más lento al ticket.
+    // HOLD_MS: cuánto tiempo se queda el diorama si la cámara pierde el ticket un momento.
+    const SCALE = 0.0052, SMOOTH = 0.18, HOLD_MS = 600;
+
+    AFRAME.registerComponent('smooth-follow', {
+      schema: { targets: { type: 'string' } },
+      init() {
+        this.targets = [...document.querySelectorAll(this.data.targets)];
+        this.p = new THREE.Vector3(); this.q = new THREE.Quaternion(); this.s = new THREE.Vector3();
+        this.has = false; this.lastSeen = 0;
+        this.el.object3D.visible = false;
+      },
+      tick(t, dt) {
+        const o = this.el.object3D;
+        const tg = this.targets.find(e => e.object3D.visible);
+        if (tg) {
+          tg.object3D.updateMatrixWorld(true);
+          tg.object3D.matrixWorld.decompose(this.p, this.q, this.s);
+          if (!this.has) { o.position.copy(this.p); o.quaternion.copy(this.q); o.scale.copy(this.s); this.has = true; }
+          else {
+            const k = 1 - Math.pow(1 - SMOOTH, (dt || 16.7) / 16.7);
+            o.position.lerp(this.p, k); o.quaternion.slerp(this.q, k); o.scale.lerp(this.s, k);
+          }
+          o.visible = true; this.lastSeen = t;
+        } else if (this.has && t - this.lastSeen > HOLD_MS) {
+          o.visible = false; this.has = false;
+        }
+      }
+    });
+
+    document.getElementById('follower').innerHTML = `
       <a-entity rotation="90 0 0">
         <a-entity rotation="0 90 0" scale="${SCALE} ${SCALE} ${SCALE}">
           <a-entity gltf-model="#odyssey" position="-832.5 7.5 1774"
             animation-mixer="clip: *; loop: repeat; timeScale: 1"></a-entity>
         </a-entity>
       </a-entity>`;
+
     const hint = document.getElementById('hint');
     let visible = 0;
     document.querySelectorAll('.card').forEach(t => {
-      t.innerHTML = diorama;
       t.addEventListener('targetFound', () => { visible++; hint.classList.add('hidden'); window.FOUND = true; });
       t.addEventListener('targetLost', () => { visible = Math.max(0, visible - 1); if (!visible) hint.classList.remove('hidden'); });
+    });
+    // Limita la resolucion en pantallas muy densas para ganar fluidez
+    document.querySelector('a-scene').addEventListener('loaded', e => {
+      const r = e.target.renderer; if (r) r.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
     });
   </script>
 </body>
